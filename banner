@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# Change the site notice and put it live.
+#
+#   ./banner "Scheduled maintenance tonight, 10pm-11pm ET"
+#   ./banner --level critical "Sign-in is degraded. We are on it."
+#   ./banner --off        # hide it, keep the message
+#   ./banner --on         # show it again
+#   ./banner --status     # what is in the file, and what the site serves
+#
+# Implementation lives in tools/banner_cli.py.
+
+exec python3 "$(dirname "$0")/tools/banner_cli.py" "$@"

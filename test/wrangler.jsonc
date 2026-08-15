@@ -1,0 +1,5 @@
+{
+  "name": "cf-banner-harness",
+  "main": "harness.js",
+  "compatibility_date": "2025-01-01"
+}
