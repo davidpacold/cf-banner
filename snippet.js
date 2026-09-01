@@ -8,9 +8,10 @@
  * ./deploy.sh does exactly the same thing.
  *
  * Design notes:
- *  - Dismissal is pure CSS (visually-hidden checkbox + sibling selector). No
- *    inline JavaScript, so it survives any script-src Content-Security-Policy
- *    the origin sets.
+ *  - Dismissal is pure CSS (visually-hidden checkbox + sibling selector), so
+ *    it survives any script-src Content-Security-Policy the origin sets. An
+ *    inline script only *remembers* the dismissal for DISMISS_DAYS; if that
+ *    script is ever blocked, dismissal simply stops persisting.
  *  - Only document responses are rewritten, so HTML fragments the SPA fetches
  *    via XHR/fetch never get a banner spliced into them.
  */
@@ -83,6 +84,16 @@ const PUSH_CONTENT = true;
 const BANNER_HEIGHT = "40px";
 
 /**
+ * How long a dismissal is remembered. Set to 0 to go back to dismissal that
+ * lasts only for the current page view.
+ *
+ * The record is keyed to the message, so deploying new text re-shows the
+ * banner even for someone who dismissed the previous one an hour ago. A stale
+ * dismissal must never suppress a fresh notice.
+ */
+const DISMISS_DAYS = 7;
+
+/**
  * The app shell. Padding the body alone is not enough: the shell and its
  * inner Tailwind `h-screen` container both stay 100vh tall, so the document
  * ends up 40px taller than the viewport and the foot of the sidebar drops
@@ -110,6 +121,69 @@ const HTML_ESCAPES = {
 };
 
 const LAST_ASCII = 126;
+
+/**
+ * Identifies this exact notice, so a dismissal cannot carry over to the next
+ * one. Not a security hash — just a short stable value that changes whenever
+ * the banner's content does.
+ */
+const DISMISS_ID = hash(`${MESSAGE}\n${LEVEL}`);
+
+/**
+ * Remembers a dismissal for DISMISS_DAYS. Progressive enhancement only: the
+ * checkbox above is what actually hides the banner, and this just restores
+ * its state on a later visit. If a script-src directive ever blocks this,
+ * the banner degrades to dismissal that lasts one page view.
+ *
+ * localStorage rather than a cookie: setting a cookie would need this same
+ * script anyway, and would add a header to every origin request.
+ */
+const DISMISS_SCRIPT = `
+<script>
+(function () {
+  // Inline script blocks the parser, so the box is ticked before the browser
+  // has anything to paint: no flash of a banner that is about to vanish.
+  var box = document.getElementById("cf-banner-dismiss");
+  if (!box) return;
+
+  var KEY = "cf-banner-dismissed";
+  var ID = "${DISMISS_ID}";
+  var TTL = ${DISMISS_DAYS} * 86400000;
+
+  // Safari's private mode and "block all cookies" throw on the property
+  // access itself rather than handing back an unusable object, so even
+  // reaching storage has to be guarded.
+  var store;
+  try {
+    store = window.localStorage;
+  } catch (e) {
+    return;
+  }
+
+  try {
+    // getItem returns null when unset, and JSON.parse(null) is null, so a
+    // first visit falls through without throwing.
+    var saved = JSON.parse(store.getItem(KEY));
+    if (saved && saved.id === ID && Date.now() - saved.at < TTL) {
+      box.checked = true;
+    }
+  } catch (e) {
+    // Corrupt record: leave the banner up. The next dismissal overwrites it.
+  }
+
+  box.addEventListener("change", function () {
+    try {
+      if (box.checked) {
+        store.setItem(KEY, JSON.stringify({ id: ID, at: Date.now() }));
+      } else {
+        store.removeItem(KEY);
+      }
+    } catch (e) {
+      // Storage full or denied. Dismissal still works for this page view.
+    }
+  });
+})();
+</script>`;
 
 // Exported so preview.mjs can render the exact same banner locally. The
 // Snippets runtime only ever calls the default export.
@@ -199,7 +273,7 @@ export const MARKUP = `
     body { padding-top: 0 !important; }
   }
 </style>
-`;
+${DISMISS_DAYS > 0 ? DISMISS_SCRIPT : ""}`;
 
 /**
  * One offset variable drives every rule, so dismissing the banner only has to
@@ -226,6 +300,20 @@ function pushContentCss() {
     padding-top: var(--cf-banner-offset) !important;
   }
   body:has(.cf-banner-toggle:checked) { --cf-banner-offset: 0px; }${shell}`;
+}
+
+/**
+ * djb2. Multiplying by 33 overflows past 2^53 for a long message, so the
+ * result is only well-defined because the XOR coerces h back to int32 on
+ * every iteration. Fine for telling one message from another, which is all
+ * this is for; not a checksum, and not a security hash.
+ */
+function hash(value) {
+  let h = 5381;
+  for (let i = 0; i < value.length; i += 1) {
+    h = (h * 33) ^ value.charCodeAt(i);
+  }
+  return (h >>> 0).toString(36);
 }
 
 /**
