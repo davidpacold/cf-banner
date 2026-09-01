@@ -25,6 +25,7 @@ injecting anything at the edge:
 | Snippet name | `SNIPPET_NAME` env | `cf_banner` |
 | App shell selector | `APP_ROOT_SELECTOR` in `snippet.js` | `#root` |
 | Reserved height | `BANNER_HEIGHT` in `snippet.js` | `40px` |
+| Dismissal memory | `DISMISS_DAYS` in `snippet.js` | `7` |
 
 The colours come from the host app's CSS custom properties (see
 [Design](#design)); point `LEVELS` in `snippet.js` at your own tokens, or
@@ -103,10 +104,25 @@ rather than to blend in.
   accents and emoji in a message all survive without touching the origin's
   own encoding.
 - **Dismissal is CSS-only** — a visually-hidden checkbox plus a sibling
-  selector, no inline JavaScript. The origin sends a `Content-Security-Policy`
-  header, so a banner depending on inline script would be one `script-src`
+  selector. The origin sends a `Content-Security-Policy` header, so a banner
+  depending on inline script to *hide itself* would be one `script-src`
   directive away from breaking. The checkbox stays focusable and carries an
   `aria-label`, so it is keyboard-operable and announced.
+- **Dismissal is remembered for `DISMISS_DAYS`** (7) by a small inline script
+  that only ticks the checkbox on a later visit — the CSS above is still what
+  hides the bar. If a `script-src` directive ever blocks that script, dismissal
+  degrades to lasting one page view; nothing breaks. The record lives in
+  `localStorage` under `cf-banner-dismissed` and is keyed to a hash of the
+  message and level, so **deploying new text re-shows the banner immediately**,
+  even for someone who dismissed the previous notice an hour ago — a stale
+  dismissal must never suppress a fresh outage notice. Set `DISMISS_DAYS = 0`
+  to drop the script and go back to per-page-view dismissal.
+
+  Every storage call is guarded: Safari's private mode and "block all cookies"
+  throw on the `window.localStorage` property access itself, and that must not
+  take the banner down with it. `localStorage` rather than a cookie because
+  setting a cookie would need the same inline script anyway, and would add a
+  header to every origin request.
 - **Content is pushed down, not covered** (`PUSH_CONTENT = true`), because the
   Airia logo sits in the top-left. See the layout note below.
 
