@@ -94,6 +94,17 @@ const BANNER_HEIGHT = "40px";
 const DISMISS_DAYS = 7;
 
 /**
+ * Bumped to re-show the banner to people who already dismissed it.
+ *
+ * The dismissal key is derived from the message, so new text re-shows itself
+ * for free. This covers the case where the text is deliberately unchanged:
+ * `./banner --off` when an incident clears, then `--on` when it recurs the
+ * next day, would otherwise be invisible to exactly the people who saw the
+ * first notice. `./banner --on` bumps this and redeploys.
+ */
+const DISMISS_EPOCH = 1;
+
+/**
  * The app shell. Padding the body alone is not enough: the shell and its
  * inner Tailwind `h-screen` container both stay 100vh tall, so the document
  * ends up 40px taller than the viewport and the foot of the sidebar drops
@@ -124,10 +135,10 @@ const LAST_ASCII = 126;
 
 /**
  * Identifies this exact notice, so a dismissal cannot carry over to the next
- * one. Not a security hash — just a short stable value that changes whenever
- * the banner's content does.
+ * one. Changes whenever the message, the level, or DISMISS_EPOCH does — the
+ * first two automatically, the third when an operator asks for a re-show.
  */
-const DISMISS_ID = hash(`${MESSAGE}\n${LEVEL}`);
+const DISMISS_ID = hash(`${MESSAGE}\n${LEVEL}\n${DISMISS_EPOCH}`);
 
 /**
  * Remembers a dismissal for DISMISS_DAYS. Progressive enhancement only: the
@@ -164,8 +175,15 @@ const DISMISS_SCRIPT = `
     // getItem returns null when unset, and JSON.parse(null) is null, so a
     // first visit falls through without throwing.
     var saved = JSON.parse(store.getItem(KEY));
-    if (saved && saved.id === ID && Date.now() - saved.at < TTL) {
-      box.checked = true;
+    if (saved && saved.id === ID) {
+      // Bounded below as well as above. A device whose clock is running ahead
+      // writes a future "at", and a negative age would satisfy an
+      // upper-bound-only test forever — suppressing the banner permanently,
+      // even once the clock is corrected.
+      var age = Date.now() - saved.at;
+      if (age >= 0 && age < TTL) {
+        box.checked = true;
+      }
     }
   } catch (e) {
     // Corrupt record: leave the banner up. The next dismissal overwrites it.
@@ -267,6 +285,19 @@ export const MARKUP = `
     opacity: 1;
   }
   .cf-banner-toggle:checked ~ .cf-banner { display: none; }
+
+  /*
+   * Hiding the banner also hides this control's only visible affordance and
+   * its focus ring (which is drawn on the close button, inside the banner),
+   * so the checkbox has to leave the tab order with it. Otherwise a keyboard
+   * user lands on an invisible "Dismiss notice" checkbox and pressing Space
+   * both re-opens the bar and wipes the stored dismissal — every page load,
+   * for DISMISS_DAYS.
+   *
+   * :checked still matches while display is none, so the sibling rule above
+   * and the :has() rule below are unaffected.
+   */
+  .cf-banner-toggle:checked { display: none; }
   ${PUSH_CONTENT ? pushContentCss() : ""}
   @media print {
     .cf-banner, .cf-banner-toggle { display: none !important; }
@@ -303,10 +334,11 @@ function pushContentCss() {
 }
 
 /**
- * djb2. Multiplying by 33 overflows past 2^53 for a long message, so the
- * result is only well-defined because the XOR coerces h back to int32 on
- * every iteration. Fine for telling one message from another, which is all
- * this is for; not a checksum, and not a security hash.
+ * djb2. The XOR coerces h back to int32 every iteration, so it stays within
+ * ±2^31 and the multiply never approaches the 2^53 limit of exact integer
+ * arithmetic — the result is identical across engines and message lengths.
+ * Fine for telling one message from another, which is all this is for; not a
+ * checksum, and not a security hash.
  */
 function hash(value) {
   let h = 5381;

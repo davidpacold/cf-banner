@@ -37,7 +37,7 @@ replace them with literal values.
 ./banner "Scheduled maintenance tonight, 10pm-11pm ET"
 ./banner --level critical "Sign-in is degraded. We are on it."
 ./banner --off        # hide it, keep the message
-./banner --on         # show it again
+./banner --on         # show it again, including to people who dismissed it
 ./banner --status     # what is in the file, and what the site is actually serving
 ```
 
@@ -106,17 +106,38 @@ rather than to blend in.
 - **Dismissal is CSS-only** — a visually-hidden checkbox plus a sibling
   selector. The origin sends a `Content-Security-Policy` header, so a banner
   depending on inline script to *hide itself* would be one `script-src`
-  directive away from breaking. The checkbox stays focusable and carries an
+  directive away from breaking. As observed on 2026-09-01 that header is
+  `frame-ancestors 'self' https://airiaazure.davidpacold.com;` with **no
+  `script-src` directive**, so inline script does run today — recorded here so
+  that a future tightening at the origin is recognised as breaking the
+  persistence below rather than looking like a mystery. The checkbox stays focusable and carries an
   `aria-label`, so it is keyboard-operable and announced.
 - **Dismissal is remembered for `DISMISS_DAYS`** (7) by a small inline script
   that only ticks the checkbox on a later visit — the CSS above is still what
   hides the bar. If a `script-src` directive ever blocks that script, dismissal
   degrades to lasting one page view; nothing breaks. The record lives in
   `localStorage` under `cf-banner-dismissed` and is keyed to a hash of the
-  message and level, so **deploying new text re-shows the banner immediately**,
-  even for someone who dismissed the previous notice an hour ago — a stale
-  dismissal must never suppress a fresh outage notice. Set `DISMISS_DAYS = 0`
-  to drop the script and go back to per-page-view dismissal.
+  message, level and `DISMISS_EPOCH`, so **deploying new text re-shows the
+  banner immediately**, even for someone who dismissed the previous notice an
+  hour ago — a stale dismissal must never suppress a fresh outage notice. Set
+  `DISMISS_DAYS = 0` to drop the script and go back to per-page-view dismissal.
+
+  `./banner --on` bumps `DISMISS_EPOCH` and redeploys, so it re-shows the bar
+  to people who already dismissed it. That is what makes `--off` when an
+  incident clears and `--on` when it recurs work: the message is deliberately
+  unchanged across that cycle, so without the epoch the second notice would be
+  invisible to exactly the audience that saw the first. (`--off` still only
+  toggles the rule.)
+
+  The age check is bounded below as well as above. A device whose clock is
+  running ahead writes a future timestamp, and an upper-bound-only test would
+  read that as "dismissed" forever, even after the clock is corrected.
+
+  A remembered dismissal also takes the checkbox out of the tab order
+  (`.cf-banner-toggle:checked { display: none }`). Hiding the banner hides this
+  control's only visible affordance *and* its focus ring, so leaving it
+  focusable would strand a keyboard user on an invisible checkbox that
+  re-opens the bar and wipes the stored dismissal.
 
   Every storage call is guarded: Safari's private mode and "block all cookies"
   throw on the `window.localStorage` property access itself, and that must not

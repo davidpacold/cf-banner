@@ -116,6 +116,16 @@ def show_status() -> None:
 
 
 def toggle(token: str, enabled: bool) -> None:
+    """--on means "show it again", and that has to include the people who
+    dismissed it. Dismissals are keyed to the message and --off/--on keeps the
+    message identical, so an incident that clears and then recurs would be
+    invisible to exactly the audience that saw the first notice. Bumping the
+    epoch changes the key, which needs the snippet re-uploaded - the rule
+    toggle alone does not carry a code change to the edge."""
+    if enabled:
+        config.write(epoch=config.read()["DISMISS_EPOCH"] + 1)
+        cf.deploy(token, verbose=False)
+
     cf.set_rule_enabled(token, cf.zone_id(token), enabled)
 
     # Confirm rather than announce. Rule changes take a few seconds to reach
@@ -131,7 +141,10 @@ def toggle(token: str, enabled: bool) -> None:
         )
 
     print(f"{GREEN}Banner {'shown' if enabled else 'hidden'}.{RESET}")
-    print(f"{DIM}The snippet stays deployed; only the rule toggles.{RESET}")
+    if enabled:
+        print(f"{DIM}Anyone who dismissed this message will see it again.{RESET}")
+    else:
+        print(f"{DIM}The snippet stays deployed; only the rule toggles.{RESET}")
 
 
 def publish(token: str, message: str | None, level: str | None) -> None:
@@ -160,7 +173,9 @@ def main() -> int:
     parser.add_argument("--level", choices=["important", "critical"])
 
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--on", action="store_true", help="show the banner")
+    mode.add_argument(
+        "--on", action="store_true", help="show it again, including to dismissers"
+    )
     mode.add_argument("--off", action="store_true", help="hide it, keep the message")
     mode.add_argument("--status", action="store_true", help="file vs. what is live")
 
