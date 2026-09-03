@@ -76,8 +76,20 @@ authenticate, merge rules, or interpret an error response.
 
 `fetch` goes to the origin, and HTML document responses get the banner
 prepended to `<body>` via `HTMLRewriter`. Non-HTML responses, non-2xx
-responses, and subresource requests (`Sec-Fetch-Dest` other than `document`)
-pass through untouched.
+responses, and subresource requests pass through untouched.
+
+A request is a navigation when `Sec-Fetch-Dest` is `document`. Clients that
+predate Fetch Metadata (Safari before 16.4, curl, monitoring probes) send that
+header on nothing at all, so for those the `Accept` header decides: browsers
+ask for `text/html` when fetching a document and for something narrower
+otherwise. A caller sending no `Accept` is passed through rather than assumed
+to be a navigation. This is why the verify command below sets `Accept` — a
+bare `curl` sends only a wildcard and is treated as a subresource.
+
+Getting this wrong is expensive in both directions. Treating every
+header-less request as a navigation strips cache validators from every asset
+those clients fetch — a full bundle re-download per page load — and splices a
+banner into any `text/html` fragment the SPA pulls over XHR.
 
 ## Design
 
@@ -122,8 +134,12 @@ rather than to blend in.
   hour ago — a stale dismissal must never suppress a fresh outage notice. Set
   `DISMISS_DAYS = 0` to drop the script and go back to per-page-view dismissal.
 
-  `./banner --on` bumps `DISMISS_EPOCH` and redeploys, so it re-shows the bar
-  to people who already dismissed it. That is what makes `--off` when an
+  `./banner --on` sets `DISMISS_EPOCH` to the current Unix time and redeploys,
+  so it re-shows the bar to people who already dismissed it. It is seeded from
+  the clock rather than incremented, because a counter lives in whichever
+  working tree last ran the command and is not committed — two operators
+  deploying from clean checkouts would both write the same next value and ship
+  an identical key, reintroducing the suppression the epoch exists to prevent. That is what makes `--off` when an
   incident clears and `--on` when it recurs work: the message is deliberately
   unchanged across that cycle, so without the epoch the second notice would be
   invisible to exactly the audience that saw the first. (`--off` still only
@@ -219,7 +235,15 @@ listed there is a different one.
 `deploy.sh` uploads the Snippet, then merges its rule into the zone's existing
 snippet rules. The merge matters: the `snippet_rules` endpoint is a full `PUT`
 replacement, so writing the rule list blindly would delete every other snippet
-rule on the zone.
+rule on the zone. The rule is replaced **in place** rather than re-appended,
+because snippet rules are first-match-wins — moving ours to the end would let
+a broader rule that used to sit behind it start winning, and the banner would
+quietly stop running.
+
+Scoping added by hand in the dashboard survives a deploy: if the existing
+rule's expression still names the target host, its expression and description
+are kept. Repointing `HOSTNAME_TARGET` leaves the old host in the expression,
+which is what allows that setting to take effect.
 
 Or paste `snippet.js` into the dashboard by hand: **Rules → Snippets → Create
 Snippet**, name `cf_banner`, filter expression:
@@ -231,7 +255,7 @@ http.host eq "airiaazure.davidpacold.com"
 ## Verify
 
 ```bash
-curl -s https://airiaazure.davidpacold.com/ | grep cf-banner
+curl -s -H 'Accept: text/html' https://airiaazure.davidpacold.com/ | grep cf-banner
 ```
 
 ## Local development

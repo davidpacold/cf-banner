@@ -57,8 +57,13 @@ def _call(token: str, method: str, path: str, *, body=None, content_type=None):
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", "replace")
-    except urllib.error.URLError as exc:
-        raise CloudflareError(f"could not reach {API}: {exc.reason}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        # A read timeout raises a bare TimeoutError, which is NOT a URLError
+        # subclass - without it here a hung API surfaces as a traceback rather
+        # than the tool's usual one-line error.
+        raise CloudflareError(
+            f"could not reach {API}: {getattr(exc, 'reason', exc)}"
+        ) from exc
 
     try:
         payload = json.loads(raw)
@@ -100,6 +105,14 @@ def zone_id(token: str, zone_name: str = ZONE_NAME) -> str:
     if not zones:
         raise CloudflareError(f"zone {zone_name} not found for this token")
     return zones[0]["id"]
+
+
+def resolve_zone(token: str) -> str:
+    """ZONE_ID short-circuits the lookup, for tokens scoped too tightly to list
+    zones. Every caller has to honour it, or a token that can deploy still
+    fails on enable/disable.
+    """
+    return os.environ.get("ZONE_ID") or zone_id(token)
 
 
 def upload_snippet(token: str, zone: str, name: str = SNIPPET_NAME) -> None:
@@ -147,21 +160,46 @@ def put_rules(token: str, zone: str, rules: list[dict]) -> None:
 
 
 def upsert_rule(token: str, zone: str, name: str = SNIPPET_NAME, host: str = HOST):
-    """Replaces our own rule, leaving every other rule on the zone intact.
+    """Replaces our own rule in place, leaving every other rule - and the order
+    they sit in - intact.
 
     snippet_rules is a whole-list PUT rather than a patch, so writing only our
-    rule would silently delete anything else the zone depends on.
+    rule would silently delete anything else the zone depends on. Order matters
+    just as much: rules are first-match-wins, so filtering ours out and
+    re-appending it at the end would let a broader rule that used to sit behind
+    it start winning, and the banner would quietly stop running.
+
+    An existing rule's expression and description are kept when the expression
+    still refers to the target host, so scoping added in the dashboard (an
+    extra path exclusion, say) survives a deploy. If HOSTNAME_TARGET has been
+    pointed somewhere else the expression no longer matches and is rewritten,
+    which is the only way that setting can take effect.
     """
-    others = [r for r in get_rules(token, zone) if r.get("snippet_name") != name]
-    others.append(
-        {
-            "expression": f"http.host eq {json.dumps(host)}",
-            "snippet_name": name,
-            "description": f"Inject banner on {host}",
-            "enabled": True,
-        }
-    )
-    put_rules(token, zone, others)
+    fresh = {
+        "expression": f"http.host eq {json.dumps(host)}",
+        "snippet_name": name,
+        "description": f"Inject banner on {host}",
+        "enabled": True,
+    }
+
+    merged, seen = [], False
+    for rule in get_rules(token, zone):
+        if rule.get("snippet_name") != name:
+            merged.append(rule)
+            continue
+        if seen:
+            continue  # collapse duplicates rather than carry them forward
+        seen = True
+        ours = dict(fresh)
+        if host in str(rule.get("expression", "")):
+            ours["expression"] = rule["expression"]
+            ours["description"] = rule.get("description", fresh["description"])
+        merged.append(ours)
+
+    if not seen:
+        merged.append(fresh)
+
+    put_rules(token, zone, merged)
 
 
 def set_rule_enabled(token: str, zone: str, enabled: bool, name: str = SNIPPET_NAME):
@@ -182,7 +220,7 @@ def deploy(token: str, *, verbose: bool = True) -> None:
             print(message)
 
     say(f"==> Resolving zone {ZONE_NAME}")
-    zone = os.environ.get("ZONE_ID") or zone_id(token)
+    zone = resolve_zone(token)
     say(f"    {zone}")
 
     say(f"==> Uploading snippet {SNIPPET_NAME}")
@@ -218,7 +256,7 @@ def main() -> int:
         elif args.command == "zone-id":
             print(zone_id(token))
         else:
-            set_rule_enabled(token, zone_id(token), args.command == "enable")
+            set_rule_enabled(token, resolve_zone(token), args.command == "enable")
     except CloudflareError as exc:
         sys.exit(f"error: {exc}")
 

@@ -171,22 +171,31 @@ const DISMISS_SCRIPT = `
     return;
   }
 
+  function dismissalIsLive(saved) {
+    if (!saved || saved.id !== ID) return false;
+    // Bounded below as well as above. A device whose clock is running ahead
+    // writes a future "at", and a negative age would satisfy an
+    // upper-bound-only test forever — suppressing the banner permanently,
+    // even once the clock is corrected. NaN fails both comparisons, so a
+    // malformed "at" shows the banner rather than hiding it.
+    var age = Date.now() - saved.at;
+    return age >= 0 && age < TTL;
+  }
+
   try {
     // getItem returns null when unset, and JSON.parse(null) is null, so a
     // first visit falls through without throwing.
-    var saved = JSON.parse(store.getItem(KEY));
-    if (saved && saved.id === ID) {
-      // Bounded below as well as above. A device whose clock is running ahead
-      // writes a future "at", and a negative age would satisfy an
-      // upper-bound-only test forever — suppressing the banner permanently,
-      // even once the clock is corrected.
-      var age = Date.now() - saved.at;
-      if (age >= 0 && age < TTL) {
-        box.checked = true;
-      }
-    }
+    //
+    // Assigned unconditionally, never only-when-true: browsers restore form
+    // control state across a reload, so a box left checked by a dismissal that
+    // has since expired would come back checked and keep the banner hidden
+    // past its window. Storage is the single source of truth. (autocomplete=off
+    // on the input asks for the same thing declaratively, for the case where
+    // this script is blocked.)
+    box.checked = dismissalIsLive(JSON.parse(store.getItem(KEY)));
   } catch (e) {
-    // Corrupt record: leave the banner up. The next dismissal overwrites it.
+    // Corrupt record: show the banner. The next dismissal overwrites it.
+    box.checked = false;
   }
 
   box.addEventListener("change", function () {
@@ -194,6 +203,9 @@ const DISMISS_SCRIPT = `
       if (box.checked) {
         store.setItem(KEY, JSON.stringify({ id: ID, at: Date.now() }));
       } else {
+        // Unreachable while a live dismissal takes the control out of the tab
+        // order (see the CSS above) — kept so the handler stays correct if a
+        // visible "show again" affordance is ever added.
         store.removeItem(KEY);
       }
     } catch (e) {
@@ -206,7 +218,7 @@ const DISMISS_SCRIPT = `
 // Exported so preview.mjs can render the exact same banner locally. The
 // Snippets runtime only ever calls the default export.
 export const MARKUP = `
-<input type="checkbox" id="cf-banner-dismiss" class="cf-banner-toggle" aria-label="Dismiss notice">
+<input type="checkbox" id="cf-banner-dismiss" class="cf-banner-toggle" aria-label="Dismiss notice" autocomplete="off">
 <div class="cf-banner" role="region" aria-label="Important notice">
   ${ICON}
   <span class="cf-banner__text">${escapeHtml(MESSAGE)}</span>
@@ -404,12 +416,31 @@ export default {
 };
 
 /**
- * Browsers label top-level navigations as "document". An absent header (curl,
- * older clients) is treated as a navigation so the banner still shows.
+ * Browsers label top-level navigations as "document".
+ *
+ * Clients that predate Fetch Metadata — Safari before 16.4, curl, monitoring
+ * probes — send no Sec-Fetch-Dest at all. Treating that as a navigation
+ * outright meant every subresource such a client fetched had its cache
+ * validators stripped (a full bundle re-download per page load), and any
+ * text/html fragment the SPA pulled over XHR got a banner spliced into it —
+ * exactly what the note at the top of this file promises cannot happen.
+ *
+ * Accept separates the two cases: browsers ask for text/html when fetching a
+ * document and for something narrower - text/css, an image type, or a bare
+ * wildcard - when fetching a subresource. A
+ * caller sending no Accept at all is passed through untouched rather than
+ * assumed to be a navigation, so an unknown client cannot be injected into.
+ *
+ * The cost is that a bare `curl` no longer sees the banner, because it sends
+ * only a wildcard Accept. Pass -H 'Accept: text/html', as the README's verify
+ * step now does. ./banner sets Sec-Fetch-Dest explicitly and is unaffected.
  */
 function isNavigation(request) {
   const dest = request.headers.get("sec-fetch-dest");
-  return dest === null || dest === "document";
+  if (dest !== null) return dest === "document";
+
+  const accept = request.headers.get("accept");
+  return accept !== null && accept.toLowerCase().includes("text/html");
 }
 
 function isHtml(response) {

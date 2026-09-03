@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --config test/wrangler.jsonc --port 8787",
+    "dev": "npx wrangler dev --config test/wrangler.jsonc --port 8787",
     "preview": "node test/preview.mjs"
   }
 }

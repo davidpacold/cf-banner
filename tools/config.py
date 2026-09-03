@@ -16,13 +16,41 @@ import pathlib
 SNIPPET = pathlib.Path(__file__).resolve().parent.parent / "snippet.js"
 KEYS = ("MESSAGE", "LEVEL", "DISMISS_EPOCH")
 
+# A snippet.js predating DISMISS_EPOCH still has to work for --status and for
+# plain publishes; only --on needs the value, and it reports the missing line
+# itself when it tries to write one. Keys absent from here stay required.
+DEFAULTS = {"DISMISS_EPOCH": 0}
 
-def _line_index(lines: list[str], key: str) -> int:
+# json.dumps(ensure_ascii=False) leaves these three raw, but str.splitlines()
+# - which every read path here uses - treats them as line terminators. A
+# message containing one would write a MESSAGE line spanning two physical
+# lines, after which _line_index can never find it again and every ./banner
+# invocation fails. \u escapes are valid in both JSON and JavaScript. The C0
+# controls that splitlines also breaks on (\v, \f, \x1c-\x1e) are already
+# escaped by json.dumps.
+LINE_TERMINATORS = {"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085"}
+
+
+def _encode(value: str | int) -> str:
+    encoded = json.dumps(value, ensure_ascii=False)
+    for char, escape in LINE_TERMINATORS.items():
+        encoded = encoded.replace(char, escape)
+    return encoded
+
+
+def _find(lines: list[str], key: str) -> int:
     prefix = f"const {key} = "
     for index, line in enumerate(lines):
         if line.startswith(prefix) and line.endswith(";"):
             return index
-    raise SystemExit(f"could not find the {key} line in {SNIPPET.name}")
+    return -1
+
+
+def _line_index(lines: list[str], key: str) -> int:
+    index = _find(lines, key)
+    if index < 0:
+        raise SystemExit(f"could not find the {key} line in {SNIPPET.name}")
+    return index
 
 
 def read() -> dict[str, str | int]:
@@ -30,13 +58,26 @@ def read() -> dict[str, str | int]:
     values = {}
 
     for key in KEYS:
-        raw = lines[_line_index(lines, key)][len(f"const {key} = ") : -1]
+        index = _find(lines, key)
+        if index < 0:
+            if key in DEFAULTS:
+                values[key] = DEFAULTS[key]
+                continue
+            raise SystemExit(f"could not find the {key} line in {SNIPPET.name}")
+
+        raw = lines[index][len(f"const {key} = ") : -1]
         try:
             values[key] = json.loads(raw)
         except ValueError:
             raise SystemExit(
                 f"{key} in {SNIPPET.name} is not a plain literal: {raw}"
             ) from None
+
+    if not isinstance(values["DISMISS_EPOCH"], int):
+        raise SystemExit(
+            f"DISMISS_EPOCH in {SNIPPET.name} must be a number, "
+            f"got {values['DISMISS_EPOCH']!r}"
+        )
 
     return values
 
@@ -64,7 +105,6 @@ def write(
         updates.append(("DISMISS_EPOCH", epoch))
 
     for key, value in updates:
-        encoded = json.dumps(value, ensure_ascii=False)
-        lines[_line_index(lines, key)] = f"const {key} = {encoded};"
+        lines[_line_index(lines, key)] = f"const {key} = {_encode(value)};"
 
     SNIPPET.write_text(newline.join(lines) + trailing, encoding="utf-8")

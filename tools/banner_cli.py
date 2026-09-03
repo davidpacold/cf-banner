@@ -23,6 +23,10 @@ import config
 
 KEYCHAIN_SERVICE = "cf-banner-cloudflare-token"
 BANNER_TEXT = re.compile(r'cf-banner__text">([^<]*)<')
+# The dismissal key the edge is serving. It changes with the message, the
+# level and DISMISS_EPOCH, which makes it the only observable proof that an
+# epoch bump actually reached Cloudflare - the message alone cannot show that.
+DISMISS_KEY = re.compile(r'var ID = "([^"]*)"')
 USER_AGENT = "cf-banner/1.0 (deploy verification)"
 
 DIM, GREEN, RED, RESET = "\033[2m", "\033[32m", "\033[31m", "\033[0m"
@@ -76,29 +80,50 @@ def fetch_page() -> str:
         raise SiteUnreachable(f"could not reach https://{cf.HOST}/: {exc}") from exc
 
 
-def live_message() -> str:
-    """What the edge is actually serving - the only trustworthy check.
+def live_state() -> tuple[str, str]:
+    """(message, dismissal key) as the edge is actually serving them.
 
     The banner escapes its text for HTML and encodes non-ASCII as numeric
     references, so this unescapes before returning. Comparing the raw forms
     would report a false mismatch for any message with a quote, an ampersand
-    or an em dash. Returns "" only when the page genuinely has no banner;
+    or an em dash. Either field is "" only when the page genuinely lacks it;
     a failed fetch raises instead, so a broken check never reads as absence.
     """
-    match = BANNER_TEXT.search(fetch_page())
-    return html.unescape(match.group(1)) if match else ""
+    page = fetch_page()
+    message = BANNER_TEXT.search(page)
+    key = DISMISS_KEY.search(page)
+    return (
+        html.unescape(message.group(1)) if message else "",
+        key.group(1) if key else "",
+    )
 
 
-def wait_for_live(expected: str, *, attempts: int = 12, delay: int = 5):
+def live_message() -> str:
+    return live_state()[0]
+
+
+def wait_for_live(
+    expected: str, *, not_key: str | None = None, attempts: int = 12, delay: int = 5
+):
     """Returns (matched, detail). Fetch failures are retried, since the edge
     can be briefly unavailable mid-deploy, but the last one is reported rather
-    than being mistaken for a missing banner."""
+    than being mistaken for a missing banner.
+
+    not_key is the dismissal key seen *before* a deploy. When given, matching
+    the message is not enough - the key has to have moved off that value, which
+    is what proves the upload propagated. Without it an --on whose message is
+    unchanged by construction would match on the first poll and report success
+    for a snippet that never reached the edge.
+    """
     detail = ""
     for attempt in range(attempts):
         try:
-            detail = live_message()
-            if detail == expected:
-                return True, detail
+            message, key = live_state()
+            detail = message
+            if message == expected:
+                if not_key is None or key != not_key:
+                    return True, detail
+                detail = f"{message!r} but the dismissal key is still {key!r}"
         except SiteUnreachable as exc:
             detail = str(exc)
         if attempt < attempts - 1:
@@ -121,18 +146,42 @@ def toggle(token: str, enabled: bool) -> None:
     message identical, so an incident that clears and then recurs would be
     invisible to exactly the audience that saw the first notice. Bumping the
     epoch changes the key, which needs the snippet re-uploaded - the rule
-    toggle alone does not carry a code change to the edge."""
-    if enabled:
-        config.write(epoch=config.read()["DISMISS_EPOCH"] + 1)
-        cf.deploy(token, verbose=False)
+    toggle alone does not carry a code change to the edge.
+    """
+    previous_key = None
 
-    cf.set_rule_enabled(token, cf.zone_id(token), enabled)
+    if enabled:
+        # What the edge serves now, so the wait below can prove the new snippet
+        # replaced it. Unreachable is not fatal here: fall back to the
+        # message-only check rather than refuse to turn the banner on.
+        try:
+            previous_key = live_state()[1]
+        except SiteUnreachable:
+            previous_key = None
+
+        # Seeded from the clock, not incremented from the file. A counter lives
+        # in whichever working tree last ran this and is not committed, so two
+        # operators from clean checkouts would both write the same next value
+        # and ship an identical key - reintroducing the suppression the epoch
+        # exists to prevent.
+        restore = config.read()["DISMISS_EPOCH"]
+        config.write(epoch=int(time.time()))
+        try:
+            cf.deploy(token, verbose=False)
+        except BaseException:
+            # Leaving snippet.js ahead of what is live is invisible to --status,
+            # which compares only the message, and the next --on would widen
+            # the gap from the local value.
+            config.write(epoch=restore)
+            raise
+
+    cf.set_rule_enabled(token, cf.resolve_zone(token), enabled)
 
     # Confirm rather than announce. Rule changes take a few seconds to reach
     # every PoP, so reporting success straight after the API call can leave
     # the next --status showing the previous state and looking broken.
     expected = config.read()["MESSAGE"] if enabled else ""
-    matched, detail = wait_for_live(expected)
+    matched, detail = wait_for_live(expected, not_key=previous_key)
 
     if not matched:
         sys.exit(
@@ -180,6 +229,14 @@ def main() -> int:
     mode.add_argument("--status", action="store_true", help="file vs. what is live")
 
     args = parser.parse_args()
+
+    # message/--level cannot live in the mutually exclusive group (they are not
+    # exclusive with each other), so the conflict is caught here. Without it
+    # `./banner --on "New text"` parsed cleanly, deployed the OLD message and
+    # reported success.
+    if (args.on or args.off or args.status) and (args.message or args.level):
+        parser.error("--on / --off / --status take no message or --level")
+
     token = resolve_token()
 
     try:
