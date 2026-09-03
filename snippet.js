@@ -102,7 +102,7 @@ const DISMISS_DAYS = 7;
  * next day, would otherwise be invisible to exactly the people who saw the
  * first notice. `./banner --on` bumps this and redeploys.
  */
-const DISMISS_EPOCH = 1;
+const DISMISS_EPOCH = 1788464231;
 
 /**
  * The app shell. Padding the body alone is not enough: the shell and its
