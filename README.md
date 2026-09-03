@@ -52,7 +52,15 @@ security add-generic-password -s cf-banner-cloudflare-token -a "$USER" -w
 ```
 
 Paste a Cloudflare API token at the prompt. `CLOUDFLARE_API_TOKEN` in the
-environment overrides the Keychain for one-off runs and CI.
+environment overrides the Keychain for one-off runs and CI. If the interactive
+prompt does not take the paste it stores an *empty* item, so pass the value
+inline instead: `security add-generic-password -U -s cf-banner-cloudflare-token
+-a "$USER" -w 'TOKEN'` (`-U` overwrites; without it the add fails as a
+duplicate). An empty item is reported as such rather than being sent as
+`Bearer ` and coming back as an opaque Cloudflare header error.
+
+`./banner --status` needs no token at all — it reads `snippet.js` and fetches
+the public page, and never calls the Cloudflare API.
 
 Editing `MESSAGE` and `LEVEL` in `snippet.js` by hand and running `./deploy.sh`
 does exactly the same thing — `./banner` is a convenience, not a layer.

@@ -40,11 +40,25 @@ Store it once in your Keychain (recommended):
 ...then paste a token with Zone > Snippets > Edit at the prompt.
 Or set CLOUDFLARE_API_TOKEN for a single run."""
 
+EMPTY_TOKEN = f"""The Keychain item {KEYCHAIN_SERVICE} exists but holds an empty
+password - which is what a prompt that did not take the paste leaves behind.
+
+Overwrite it (-U, or the add fails as a duplicate):
+
+  security add-generic-password -U -s {KEYCHAIN_SERVICE} -a "$USER" -w
+
+If the interactive prompt still does not take it, pass the value inline:
+
+  security add-generic-password -U -s {KEYCHAIN_SERVICE} -a "$USER" -w 'TOKEN'"""
+
 
 def resolve_token() -> str:
     """Environment first so one-off runs and CI work, then the Keychain so
-    day-to-day use needs no setup. Never written to disk in plaintext."""
-    if token := os.environ.get("CLOUDFLARE_API_TOKEN"):
+    day-to-day use needs no setup. Never written to disk in plaintext.
+
+    Both sources are checked for an empty value, not merely for being set.
+    """
+    if token := os.environ.get("CLOUDFLARE_API_TOKEN", "").strip():
         return token
 
     try:
@@ -54,9 +68,17 @@ def resolve_token() -> str:
             text=True,
             check=True,
         )
-        return found.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         sys.exit(NO_TOKEN)
+
+    # `security` exits 0 for an item that exists but holds an empty password.
+    # Passing that on sends "Bearer " with nothing after it, and Cloudflare
+    # answers with an opaque "Invalid format for Authorization header" rather
+    # than anything pointing at the Keychain.
+    if not (token := found.stdout.strip()):
+        sys.exit(EMPTY_TOKEN)
+
+    return token
 
 
 class SiteUnreachable(RuntimeError):
@@ -237,7 +259,11 @@ def main() -> int:
     if (args.on or args.off or args.status) and (args.message or args.level):
         parser.error("--on / --off / --status take no message or --level")
 
-    token = resolve_token()
+    # --status reads snippet.js and fetches the public page; it never calls the
+    # Cloudflare API. Resolving a token here implied one had been checked, so an
+    # empty Keychain item printed a clean bill of health and the failure only
+    # surfaced later, from Cloudflare, on the next command that actually deployed.
+    token = "" if args.status else resolve_token()
 
     try:
         if args.status:
